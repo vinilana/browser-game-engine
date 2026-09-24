@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aether Sandbox</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font: 13px system-ui, sans-serif; color: #eee; }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+    #info { position: fixed; left: 12px; top: 12px; background: rgba(0,0,0,.45); padding: 10px 12px; border-radius: 8px; line-height: 1.6; }
+    #info b { color: #e8c170; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="info"><b>Aether Engine · Sandbox</b><br/>Exemplo mínimo da engine sem voxels: terreno por heightfield, materiais PBR, sombras em cascata, céu físico.<br/>Clique para controlar · WASD + mouse · Espaço/Shift sobe/desce · 1–4 hora do dia · R chuva</div>
+  <script type="module" src="./src/sandbox/main.js"></script>
+</body>
+</html>

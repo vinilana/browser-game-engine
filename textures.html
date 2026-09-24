@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Aether — Texture Lab</title>
+  <style>
+    body { margin: 0; background: #1b1c1f; color: #ddd; font: 12px system-ui, sans-serif; }
+    header { padding: 10px 14px; font-size: 14px; }
+    #grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px; }
+    .t { background: #26282c; padding: 6px; border-radius: 6px; }
+    .t canvas { display: block; image-rendering: pixelated; }
+    .row { display: flex; gap: 4px; }
+  </style>
+</head>
+<body>
+  <header>Aether Texture Lab — albedo (lit preview) · albedo · normal · roughness/metal/AO</header>
+  <div id="grid"></div>
+  <script type="module" src="./src/tools/texturePreview.js"></script>
+</body>
+</html>

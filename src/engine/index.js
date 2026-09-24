@@ -1,0 +1,24 @@
+// Aether Engine public API
+export { Engine } from './core/Engine.js';
+export { EventEmitter } from './core/EventEmitter.js';
+export { Input } from './core/Input.js';
+export { Settings, QUALITY_PRESETS } from './core/Settings.js';
+export { WorkerPool, exposeWorker, withTransfer } from './core/WorkerPool.js';
+export { RenderPipeline } from './render/RenderPipeline.js';
+export { Atmosphere } from './render/Atmosphere.js';
+export { ShadowCascades } from './render/ShadowCascades.js';
+export { FullscreenPass } from './render/FullscreenPass.js';
+export { GBufferMaterial } from './render/materials/GBufferMaterial.js';
+export { convertToGBuffer } from './render/materials/convert.js';
+export { FarTerrain } from './terrain/FarTerrain.js';
+export { ParticleSystem } from './fx/ParticleSystem.js';
+export { Weather } from './fx/Weather.js';
+export { AudioEngine } from './audio/AudioEngine.js';
+export { MAT_FLAGS } from './render/shaders/lighting.js';
+export { BlockRegistry, RenderType, Tint, Waving, Face } from './voxel/BlockRegistry.js';
+export { VoxelWorld, colKey } from './voxel/VoxelWorld.js';
+export { VoxelBody } from './voxel/VoxelPhysics.js';
+export { CHUNK, WORLD_HEIGHT } from './voxel/Mesher.js';
+export { TexCtx, synthesize, hex, mixColor } from './voxel/TextureSynth.js';
+export { Simplex, TileNoise } from './math/noise.js';
+export * from './math/rng.js';

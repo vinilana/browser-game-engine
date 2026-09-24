@@ -1,0 +1,40 @@
+// Simple line-art SVG icons (currentColor) for the RTS interface.
+const S = (body, vb = '0 0 24 24') => `<svg viewBox="${vb}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+
+export const ICONS = {
+  food: S('<path d="M7 3c2 3 2 6 0 8M11 3c2 3 2 6 0 8"/><ellipse cx="12" cy="16" rx="7" ry="4.5" fill="currentColor" fill-opacity=".25"/><path d="M5 16h14"/>'),
+  wood: S('<ellipse cx="7" cy="12" rx="3" ry="5"/><path d="M7 7h11a3 5 0 0 1 0 10H7"/><ellipse cx="7" cy="12" rx="1.2" ry="2"/>'),
+  gold: S('<path d="M4 17l3-7h10l3 7z" fill="currentColor" fill-opacity=".3"/><path d="M8 10l2-4h4l2 4"/>'),
+  stone: S('<path d="M3 18l3-8 5-3 6 2 4 9z" fill="currentColor" fill-opacity=".2"/><path d="M11 7l1 5 5 1"/>'),
+  pop: S('<circle cx="12" cy="7" r="3.2"/><path d="M5 20c0-4 3-7 7-7s7 3 7 7"/>'),
+  villager: S('<circle cx="12" cy="6" r="3"/><path d="M7 21v-6l-2-3 3-3h8l3 3-2 3v6"/><path d="M17 5l3-2"/>'),
+  militia: S('<circle cx="10" cy="6" r="3"/><path d="M6 21v-7l-2-3 3-2h6l2 2"/><path d="M15 16l6-12M19 6l2 1"/><circle cx="7" cy="14" r="3.2"/>'),
+  spearman: S('<circle cx="10" cy="7" r="3"/><path d="M6 21v-7l-2-3 3-2h6"/><path d="M19 2v20M17 5l2-3 2 3"/>'),
+  archer: S('<circle cx="11" cy="6" r="3"/><path d="M7 21v-7l-2-3 3-2h6"/><path d="M18 3c4 5 4 13 0 18"/><path d="M18 3v18"/><path d="M11 12h8"/>'),
+  scout: S('<path d="M3 17l3-5 6-1 4-4 3 1-1 3 1 6"/><path d="M6 12v7M16 12v7"/><circle cx="12" cy="6" r="2"/>'),
+  knight: S('<path d="M3 17l3-5 6-1 4-4 3 1-1 3 1 6"/><path d="M6 12v7M16 12v7"/><path d="M10 7h4v-3h-4z"/><path d="M12 4V2"/>'),
+  town_center: S('<path d="M3 20h18M5 20V11l7-5 7 5v9"/><path d="M10 20v-5h4v5"/><path d="M12 6V2l3 1-3 1"/>'),
+  house: S('<path d="M4 20V11l8-6 8 6v9z"/><path d="M10 20v-5h4v5"/>'),
+  lumber_camp: S('<path d="M3 11l9-6 9 6"/><path d="M5 10v10M19 10v10"/><ellipse cx="9" cy="17" rx="2" ry="2"/><ellipse cx="15" cy="17" rx="2" ry="2"/><path d="M9 15h6M9 19h6"/>'),
+  mill: S('<path d="M8 21l2-11h4l2 11z"/><path d="M12 8l-6-6M12 8l6-6M12 8l-6 6M12 8l6 6"/>'),
+  mining_camp: S('<path d="M3 11l9-6 9 6"/><path d="M5 10v10M19 10v10"/><path d="M8 20l2-5h4l2 5"/><path d="M14 9l4 4"/>'),
+  farm: S('<path d="M3 19l4-9h10l4 9z"/><path d="M7 10l-2 9M12 10v9M17 10l2 9"/>'),
+  barracks: S('<path d="M3 20h18M4 20V10h16v10"/><path d="M4 10l8-5 8 5"/><path d="M9 14l6 6M15 14l-6 6"/>'),
+  archery_range: S('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor"/><path d="M20 4l-7 7"/>'),
+  stable: S('<path d="M3 20V10l9-5 9 5v10"/><path d="M8 20v-6h8v6"/><path d="M8 14l8 6"/>'),
+  watch_tower: S('<path d="M8 21V9h8v12"/><path d="M6 9h12l-2-4H8z"/><path d="M11 21v-4h2v4"/>'),
+  build: S('<path d="M14 4l6 6-2 2-6-6z"/><path d="M12 6L4 20"/>'),
+  military: S('<path d="M5 19L19 5M15 5h4v4"/><path d="M5 5l4 4M9 5H5v4"/><path d="M19 19l-4-4"/>'),
+  stop: S('<rect x="6" y="6" width="12" height="12" rx="1"/>'),
+  delete: S('<path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"/>'),
+  age: S('<path d="M4 20l3-10 5 4 5-10 3 16z"/>'),
+  back: S('<path d="M15 5l-7 7 7 7"/>'),
+  sheep: S('<ellipse cx="12" cy="12" rx="7" ry="5"/><circle cx="19" cy="10" r="2"/><path d="M8 17v3M16 17v3"/>'),
+  deer: S('<path d="M5 12h11l3-3"/><path d="M19 9l1-5M19 9l3-3M7 12v7M14 12v7"/>'),
+  tree: S('<path d="M12 3l6 9h-3l4 6H5l4-6H6z"/><path d="M12 18v3"/>'),
+  berry: S('<circle cx="9" cy="13" r="3"/><circle cx="15" cy="14" r="3"/><circle cx="12" cy="9" r="3"/>'),
+  idle: S('<circle cx="12" cy="6" r="3"/><path d="M7 21v-6l-2-3 3-3h8l3 3-2 3v6"/><path d="M19 3l2 2M21 3l-2 2"/>'),
+  menu: S('<path d="M4 7h16M4 12h16M4 17h16"/>'),
+};
+
+export function icon(name) { return ICONS[name] || ICONS.stop; }
