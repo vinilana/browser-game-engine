@@ -1,7 +1,7 @@
 // Core simulation of "Reinos": players, entities, spatial queries, production,
 // combat resolution, fog of war and victory conditions.
 import { DataTexture, RedFormat, UnsignedByteType, LinearFilter } from 'three';
-import { UNITS, BUILDINGS, AGES, START_RES, POP_CAP, MAP_SIZE, GRID, TEAMS, RESOURCES } from './config.js';
+import { UNITS, BUILDINGS, AGES, START_RES, POP_CAP, MAP_SIZE, GRID, TEAMS, RESOURCES, HERD } from './config.js';
 import { Unit, Building, ResourceNode, Projectile } from './entities.js';
 import { LAYER } from './mapgen.js';
 
@@ -18,6 +18,7 @@ export class Player {
     this.age = 0;
     this.color = TEAMS[index].color;
     this.defeated = false;
+    this.autoReseed = true;
     this.stats = { unitsKilled: 0, unitsLost: 0, buildingsBuilt: 0 };
   }
   canAfford(cost) { return Object.entries(cost || {}).every(([k, v]) => this.res[k] >= v); }
@@ -133,6 +134,48 @@ export class Simulation {
     return best;
   }
 
+  /** Nearest animal to hunt (own or wild ones first; `species` narrows it down). */
+  findHuntable(unit, x, z, r, species = null) {
+    let best = null, bd = Infinity;
+    for (const a of this.unitsNear(x, z, r)) {
+      if (!a.alive || !a.isAnimal || (species && a.kind !== species)) continue;
+      if (unit?._skip?.has(a)) continue;
+      const d = Math.hypot(a.x - x, a.z - z) + (a.owner >= 0 && a.owner !== unit.owner ? 6 : 0);
+      if (d < r && d < bd) { bd = d; best = a; }
+    }
+    return best;
+  }
+
+  /** How many units are working on / attacking a target. */
+  workersOn(t) {
+    let n = 0;
+    for (const u of this.units) if (u.alive && u.order && u.order.target === t) n++;
+    return n;
+  }
+
+  /**
+   * Herdables (sheep) join the side of a unit that walks up to them; a flock is stolen when an
+   * enemy comes close and none of the owner's units is around to guard it.
+   */
+  herdCheck(a) {
+    let best = null, bd = HERD.convert;
+    let guarded = false;
+    for (const u of this.unitsNear(a.x, a.z, HERD.guard)) {
+      if (!u.alive || u.isAnimal || u.owner < 0) continue;
+      const d = Math.hypot(u.x - a.x, u.z - a.z);
+      if (u.owner === a.owner) { guarded = true; continue; }
+      if (d < bd) { bd = d; best = u; }
+    }
+    if (!best || (a.owner >= 0 && guarded)) return;
+    const from = a.owner;
+    a.owner = best.owner;
+    a.order = null;
+    a.path = null; a.goal = null;
+    a.home = { x: a.x, z: a.z };
+    a.selected = false;
+    this.game.onHerdConverted?.(a, from, best.owner);
+  }
+
   findDropSite(owner, res, x, z) {
     let best = null, bd = 1e9;
     for (const b of this.buildings) {
@@ -201,11 +244,12 @@ export class Simulation {
     const u = this.addUnit(kind, owner, sx, sz);
     u.heading = ang + Math.PI / 2;
     if (building.rally) {
-      if (building.rally.target && kind === 'villager') {
-        const t = building.rally.target;
-        if (t.isResource || t.type === 'tree') u.command({ type: 'gather', target: t, kind: t.type });
-        else u.moveTo(building.rally.x, building.rally.z);
-      } else u.moveTo(building.rally.x, building.rally.z);
+      // villagers sent to a resource start working on arrival
+      const t = building.rally.target;
+      if (t && kind === 'villager' && (t.isResource || t.type === 'tree') && (t.type === 'tree' ? t.amount > 0 : t.alive)) u.command({ type: 'gather', target: t, kind: t.type });
+      else if (t && kind === 'villager' && t.isUnit && t.isAnimal && t.alive) u.command({ type: 'attack', target: t, hunt: true });
+      else if (t && kind === 'villager' && t.isBuilding && t.alive && !t.built && t.owner === owner) u.command({ type: 'build', target: t });
+      else u.moveTo(building.rally.x, building.rally.z);
     }
     this.game.onUnitTrained?.(u, building);
     return u;
@@ -217,14 +261,16 @@ export class Simulation {
     u.hp = 0;
     u.deadT = 0;
     u.order = null;
-    if (u.owner >= 0) {
+    if (u.owner >= 0 && !u.isAnimal) {
       this.players[u.owner].pop -= u.def.pop || 0;
       this.players[u.owner].stats.unitsLost++;
     }
-    if (u.lastHitBy && u.lastHitBy.owner >= 0) this.players[u.lastHitBy.owner].stats.unitsKilled++;
+    if (!u.isAnimal && u.lastHitBy && u.lastHitBy.owner >= 0 && u.lastHitBy.owner !== u.owner) this.players[u.lastHitBy.owner].stats.unitsKilled++;
+    u.queue.length = 0;
     if (u.isAnimal) {
       const c = this.addResource('carcass', u.x, u.z, u.def.food);
       c.corpse = u;
+      c.species = u.kind;
       u.carcass = c;
       u.removeAt = Infinity;
     } else {
@@ -298,20 +344,35 @@ export class Simulation {
     this.game.onBuildingDestroyed?.(b);
   }
 
+  /** An exhausted field is replanted automatically when its owner can pay (like the mill queue in AoE II). */
   farmDepleted(b) {
+    const p = this.players[b.owner];
+    if (p.autoReseed && p.canAfford(BUILDINGS.farm.cost)) {
+      p.pay(BUILDINGS.farm.cost);
+      b.food = BUILDINGS.farm.food;
+      this.game.onFarmReseeded?.(b);
+      return;
+    }
     b.food = 0;
     this.destroyBuilding(b);
+    this.game.onFarmExhausted?.(b);
   }
 
-  fireProjectile(from, target, origin) {
-    this.projectiles.push(new Projectile(this, from, target, origin));
-    this.game.onFire?.(from);
+  fireProjectile(from, target, origin, opts) {
+    const p = new Projectile(this, from, target, origin, opts);
+    this.projectiles.push(p);
+    this.game.onFire?.(from, p.kind);
   }
 
-  stuckArrow(x, y, z, dx, dz) { this.game.renderer?.stuckArrow(x, y, z, dx, dz); }
+  stuckArrow(x, y, z, dx, dz, kind) { this.game.renderer?.stuckArrow(x, y, z, dx, dz, kind); }
+  onProjectileHit(p, t) { this.game.onProjectileHit?.(p, t); }
+  onWhiff(u, t) { this.game.onWhiff?.(u, t); }
+  onStrike(u, kind, t) { this.game.onStrike?.(u, kind, t); }
+  onRepaired(b, u) { this.game.onRepaired?.(b, u); }
+  onRepairStalled(u, b, res) { this.game.onRepairStalled?.(u, b, res); }
   onDamaged(t, from) { this.game.onDamaged?.(t, from); }
   onGatherTick(u, kind) { this.game.onGatherTick?.(u, kind); }
-  onDeposit(u, b) { this.game.onDeposit?.(u, b); }
+  onDeposit(u, b, res, amount) { this.game.onDeposit?.(u, b, res, amount); }
   onBuildTick(u, b) { this.game.onBuildTick?.(u, b); }
   onMeleeHit(u, t) { this.game.onMeleeHit?.(u, t); }
 
@@ -414,7 +475,12 @@ export class Simulation {
     if (this.buildings.some((b) => !b.alive)) this.buildings = this.buildings.filter((b) => b.alive);
     if (this.resources.some((r) => !r.alive)) this.resources = this.resources.filter((r) => r.alive);
     // carcasses rot slowly
-    for (const r of this.resources) if (r.type === 'carcass' && r.alive) { r.rot = (r.rot || 0) + dt * RESOURCES.carcass.decay; if (r.rot >= 1) { r.rot -= 1; r.take(1); } }
+    // abandoned carcasses rot (while being butchered they keep)
+    for (const r of this.resources) {
+      if (r.type !== 'carcass' || !r.alive || this.time - (r.worked || -9) < 2) continue;
+      r.rot = (r.rot || 0) + dt * RESOURCES.carcass.decay;
+      if (r.rot >= 1) { r.rot -= 1; r.take(1); }
+    }
     this.fowT -= dt;
     if (this.fowT <= 0) { this.fowT = 0.2; this._updateFow(); }
     this._checkVictory();

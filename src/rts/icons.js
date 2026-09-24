@@ -35,6 +35,12 @@ export const ICONS = {
   berry: S('<circle cx="9" cy="13" r="3"/><circle cx="15" cy="14" r="3"/><circle cx="12" cy="9" r="3"/>'),
   idle: S('<circle cx="12" cy="6" r="3"/><path d="M7 21v-6l-2-3 3-3h8l3 3-2 3v6"/><path d="M19 3l2 2M21 3l-2 2"/>'),
   menu: S('<path d="M4 7h16M4 12h16M4 17h16"/>'),
+  attackMove: S('<path d="M4 20L15 9l3-3v3L7 20z"/><path d="M3 16l5 5"/><path d="M14 19h7M18 16l3 3-3 3"/>'),
+  aggressive: S('<path d="M5 19L16 8l3-3v3L8 19z"/><path d="M4 15l5 5"/><path d="M19 19L8 8 5 5v3l11 11z" stroke-opacity=".55"/>'),
+  defensive: S('<path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z"/><path d="M12 7v10"/>'),
+  ground: S('<path d="M7 21V4"/><path d="M7 5h10l-3 4 3 4H7"/><path d="M4 21h10"/>'),
+  meat: S('<ellipse cx="10" cy="13" rx="6" ry="5"/><path d="M15 9l5-5M18 4l2 2"/>'),
+  spear: S('<path d="M4 20L17 7"/><path d="M14 5l6-1-1 6z"/>'),
 };
 
 export function icon(name) { return ICONS[name] || ICONS.stop; }

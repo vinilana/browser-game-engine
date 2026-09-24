@@ -124,12 +124,122 @@ export class RTSAudio extends AudioEngine {
     this._burst({ type: 'bandpass', freq: 2200, q: 2, dur: 0.03, gain: 0.08 });
   }
 
+  /** Order acknowledgement: a short motif per verb so the ear confirms what was ordered. */
   ack(u, kind) {
     if (!this.ctx || !this._throttle('ack', 120)) return;
-    const f = kind === 'attack' ? 330 : 550;
-    this._tone({ freq: f, type: 'triangle', dur: 0.07, gain: 0.05 });
-    this._tone({ freq: f * 1.5, type: 'triangle', dur: 0.07, gain: 0.04, when: 0.07 });
-    if (u && !u.isVillager && kind === 'attack') this._tone({ freq: 2600, type: 'triangle', dur: 0.2, gain: 0.03, when: 0.02 });
+    const two = (f, g = 0.05, type = 'triangle') => {
+      this._tone({ freq: f, type, dur: 0.07, gain: g });
+      this._tone({ freq: f * 1.5, type, dur: 0.07, gain: g * 0.8, when: 0.07 });
+    };
+    switch (kind) {
+      case 'attack': case 'attackMove':
+        two(330);
+        if (u && !u.isVillager) this._tone({ freq: 2600, type: 'triangle', dur: 0.2, gain: 0.03, when: 0.02 });
+        break;
+      case 'hunt':
+        this._tone({ freq: 392, type: 'sawtooth', dur: 0.12, gain: 0.025, attack: 0.02 });
+        this._tone({ freq: 523, type: 'sawtooth', dur: 0.16, gain: 0.025, attack: 0.02, when: 0.1 });
+        break;
+      case 'chop':
+        this._burst({ type: 'bandpass', freq: 760, q: 5, dur: 0.06, gain: 0.3 });
+        this._burst({ type: 'bandpass', freq: 700, q: 5, dur: 0.06, gain: 0.25, when: 0.11 });
+        break;
+      case 'mine':
+        this._tone({ freq: 2600, type: 'triangle', dur: 0.08, gain: 0.04 });
+        this._tone({ freq: 3100, type: 'triangle', dur: 0.08, gain: 0.03, when: 0.09 });
+        break;
+      case 'forage': case 'farm':
+        this._burst({ type: 'bandpass', freq: 2800, q: 0.8, dur: 0.12, gain: 0.12 });
+        two(660, 0.03, 'sine');
+        break;
+      case 'butcher':
+        this._burst({ type: 'bandpass', freq: 420, q: 3, dur: 0.08, gain: 0.25 });
+        two(494, 0.03, 'sine');
+        break;
+      case 'build': case 'repair':
+        this._burst({ type: 'bandpass', freq: 520, q: 6, dur: 0.05, gain: 0.3 });
+        this._burst({ type: 'bandpass', freq: 560, q: 6, dur: 0.05, gain: 0.3, when: 0.12 });
+        break;
+      case 'dropoff':
+        this._burst({ buffer: this.brown, type: 'lowpass', freq: 300, q: 0.7, dur: 0.1, gain: 0.5 });
+        two(587, 0.03, 'sine');
+        break;
+      case 'rally':
+        two(784, 0.03, 'sine');
+        break;
+      default:
+        two(550);
+    }
+  }
+
+  /** Knife work on a carcass. */
+  butcher(x, z) {
+    if (!this.ctx) return;
+    const { vol, pan } = this._spatial(x, z);
+    if (vol < 0.03) return;
+    this._burst({ type: 'bandpass', freq: 380 + Math.random() * 120, q: 2.5, dur: 0.08, gain: 0.3 * vol, pan });
+    this._burst({ type: 'highpass', freq: 3500, q: 0.7, dur: 0.03, gain: 0.08 * vol, pan, when: 0.02 });
+  }
+
+  /** Farming: hoe in soft soil. */
+  hoe(x, z) {
+    if (!this.ctx || !this._throttle('hoe', 250)) return;
+    const { vol, pan } = this._spatial(x, z);
+    if (vol < 0.05) return;
+    this._burst({ buffer: this.brown, type: 'lowpass', freq: 500, q: 0.8, dur: 0.1, gain: 0.35 * vol, pan });
+    this._burst({ type: 'bandpass', freq: 1800, q: 0.7, dur: 0.07, gain: 0.07 * vol, pan });
+  }
+
+  spearThrow(x, z) {
+    if (!this.ctx) return;
+    const { vol, pan } = this._spatial(x, z);
+    if (vol < 0.03) return;
+    this._burst({ type: 'bandpass', freq: 900, q: 0.9, dur: 0.3, gain: 0.25 * vol, pan, attack: 0.08 });
+    this._tone({ freq: 180, dur: 0.1, gain: 0.05 * vol, sweep: -60, pan });
+  }
+
+  /** A blow that finds only air. */
+  whiff(x, z) {
+    if (!this.ctx || !this._throttle('whiff', 90)) return;
+    const { vol, pan } = this._spatial(x, z);
+    if (vol < 0.05) return;
+    this._burst({ type: 'bandpass', freq: 1400, q: 1.2, dur: 0.16, gain: 0.12 * vol, pan, attack: 0.05 });
+  }
+
+  /** Blunt hit on flesh / leather. */
+  thud(x, z, g = 1) {
+    if (!this.ctx) return;
+    const { vol, pan } = this._spatial(x, z);
+    if (vol < 0.03) return;
+    this._burst({ buffer: this.brown, type: 'lowpass', freq: 260, q: 0.8, dur: 0.12, gain: 0.7 * vol * g, pan });
+    this._burst({ type: 'bandpass', freq: 700, q: 2, dur: 0.05, gain: 0.15 * vol * g, pan });
+  }
+
+  /** A sheep's bleat (vibrato through a vowel-like formant). */
+  baa(x, z) {
+    if (!this.ctx || !this._throttle('baa', 700)) return;
+    const { vol, pan } = x === undefined ? { vol: 0.8, pan: 0 } : this._spatial(x, z);
+    if (vol < 0.05) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = 'sawtooth';
+    const base = 300 + Math.random() * 90;
+    o.frequency.setValueAtTime(base, t);
+    o.frequency.linearRampToValueAtTime(base * 1.08, t + 0.08);
+    o.frequency.linearRampToValueAtTime(base * 0.92, t + 0.55);
+    const lfo = ctx.createOscillator(), lg = ctx.createGain();
+    lfo.frequency.value = 22; lg.gain.value = base * 0.045;
+    lfo.connect(lg).connect(o.frequency);
+    const f1 = ctx.createBiquadFilter(); f1.type = 'bandpass'; f1.frequency.value = 950; f1.Q.value = 3;
+    const f2 = ctx.createBiquadFilter(); f2.type = 'lowpass'; f2.frequency.value = 2400;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.16 * vol, t + 0.05);
+    g.gain.setValueAtTime(0.16 * vol, t + 0.4);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.62);
+    const p = ctx.createStereoPanner(); p.pan.value = pan;
+    o.connect(f1).connect(f2).connect(g).connect(p).connect(this.sfx);
+    o.start(t); lfo.start(t); o.stop(t + 0.65); lfo.stop(t + 0.65);
   }
 
   error() {

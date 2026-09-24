@@ -89,6 +89,14 @@ export const RESOURCES = {
 };
 
 export const GATHER_RATE = { tree: 0.39, gold: 0.38, stone: 0.36, berry: 0.31, carcass: 0.42, farm: 0.33 };
+/** Villagers hunt with a spear: thrown at deer, stabbed into sheep. */
+export const HUNT = { throwRange: 4.5, rate: 0.5, throwDamage: 3, stabDamage: 4 };
+/** Seconds of chopping before a standing tree comes down. */
+export const FELL_TIME = 1.8;
+/** Repairing restores hp at this multiple of the build speed and costs this share of the building's price (full repair). */
+export const REPAIR = { speed: 1.5, cost: 0.5 };
+/** Sheep switch to the owner of a unit that comes this close (m); an owner's unit within `guard` prevents theft. */
+export const HERD = { convert: 4.5, guard: 9 };
 export const CARRY = 10;
 export const BUILD_RATE = 1;       // build-seconds per villager-second
 export const START_RES = { food: 200, wood: 200, gold: 100, stone: 200 };

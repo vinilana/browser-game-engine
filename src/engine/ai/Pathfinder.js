@@ -223,6 +223,13 @@ export class GridPathfinder {
     return out.length ? out : [[gx, gz]];
   }
 
+  /** True when a straight walk between two world points crosses only free cells. */
+  lineFree(x0, z0, x1, z1) {
+    const [i0, j0] = this.cellOf(x0, z0), [i1, j1] = this.cellOf(x1, z1);
+    if (!this.inBounds(i0, j0) || !this.isFree(i1, j1)) return false;
+    return this.lineOfSight(j0 * this.w + i0, j1 * this.w + i1);
+  }
+
   /** Supercover grid traversal between two cells. */
   lineOfSight(a, b) {
     const w = this.w;

@@ -12,6 +12,7 @@ import { mulberry32 } from '../engine/math/rng.js';
 import { TEAMS } from './config.js';
 
 const _m = new Matrix4(), _q = new Quaternion(), _p = new Vector3(), _s = new Vector3(1, 1, 1), _e = new Euler(), _up = new Vector3(0, 1, 0);
+const _fwd = new Vector3(0, 0, 1), _pos = new Vector3();
 const GAIA_COLOR = [0.75, 0.72, 0.66];
 
 function modelFor(u) {
@@ -45,6 +46,21 @@ export class GameRenderer {
     this.stuckMesh.frustumCulled = false;
     this.stuckMesh.count = 0;
     this.pipeline.scene.add(this.stuckMesh);
+    // hunting spears (in flight and stuck in the ground after a miss)
+    const sb = new MeshBuilder();
+    sb.set({ color: [0.46, 0.34, 0.2] }); sb.cylinder([0, 0, -0.9], [0, 0, 0.75], 0.02, 0.018, 5);
+    sb.set({ color: [0.62, 0.63, 0.66] }); sb.cone([0, 0, 0.75], [0, 0, 0.98], 0.04, 5);
+    const spearGeo = sb.build();
+    this.spearMat = new GBufferMaterial({ vertexColors: true, roughness: 0.6 });
+    this.spears = new InstancedMesh(spearGeo, this.spearMat, 64);
+    this.spears.instanceMatrix.setUsage(DynamicDrawUsage);
+    this.spears.frustumCulled = false;
+    this.spears.count = 0;
+    this.pipeline.scene.add(this.spears);
+    this.stuckSpears = new InstancedMesh(spearGeo, this.spearMat, 64);
+    this.stuckSpears.frustumCulled = false;
+    this.stuckSpears.count = 0;
+    this.pipeline.scene.add(this.stuckSpears);
     this.wheatGeo = buildTuft(0.9, 1.0);
   }
 
@@ -182,6 +198,8 @@ export class GameRenderer {
       const berries = new Mesh(bb.build(), this.M.berry);
       group.add(berries);
       group.userData.berries = berries;
+      group.userData.berryIndex = berries.geometry.index.count;
+      group.userData.berryCount = Math.max(1, bush.berries.length);
     }
     group.rotation.y = rnd() * Math.PI * 2;
     this.pipeline.scene.add(group);
@@ -197,8 +215,8 @@ export class GameRenderer {
     this.resourceViews.delete(n);
   }
 
-  stuckArrow(x, y, z, dx, dz) {
-    this.stuck.push({ x, y, z, a: Math.atan2(dx, dz), t: 0 });
+  stuckArrow(x, y, z, dx, dz, kind = 'arrow') {
+    this.stuck.push({ x, y, z, a: Math.atan2(dx, dz), t: 0, kind });
     if (this.stuck.length > 250) this.stuck.shift();
   }
 
@@ -246,29 +264,40 @@ export class GameRenderer {
     for (const [n, g] of this.resourceViews) {
       const f = n.amount / n.maxAmount;
       if (n.type === 'gold' || n.type === 'stone') { const s = 0.45 + 0.55 * Math.sqrt(f); g.scale.set(s, s, s); }
-      if (n.type === 'berry' && g.userData.berries) g.userData.berries.visible = f > 0.02;
+      if (n.type === 'berry' && g.userData.berries) {
+        // berries disappear a few at a time as the bush is picked
+        const b = g.userData.berries;
+        const n = g.userData.berryCount, per = g.userData.berryIndex / n;
+        b.geometry.setDrawRange(0, Math.ceil(n * f) * per);
+        b.visible = f > 0.01;
+      }
     }
-    // arrows in flight
-    let k = 0;
+    // arrows and spears in flight
+    let k = 0, ks = 0;
     for (const p of sim.projectiles) {
-      if (k >= 512) break;
+      if (p.owner === 1 && !sim.isVisibleTo(0, p.x, p.z)) continue;
       const dir = _p.set(p.dx || 0, p.dy || 0, p.dz || 1).normalize();
-      _q.setFromUnitVectors(new Vector3(0, 0, 1), dir);
-      _m.compose(new Vector3(p.x, p.y, p.z), _q, _s.set(1, 1, 1));
-      this.arrows.setMatrixAt(k++, _m);
+      _q.setFromUnitVectors(_fwd, dir);
+      _m.compose(_pos.set(p.x, p.y, p.z), _q, _s.set(1, 1, 1));
+      if (p.kind === 'spear') { if (ks < 64) this.spears.setMatrixAt(ks++, _m); } else if (k < 512) this.arrows.setMatrixAt(k++, _m);
     }
     this.arrows.count = k;
     this.arrows.instanceMatrix.needsUpdate = true;
-    k = 0;
+    this.spears.count = ks;
+    this.spears.instanceMatrix.needsUpdate = true;
+    k = 0; ks = 0;
     for (const a of this.stuck) {
       a.t += dt;
-      _q.setFromEuler(_e.set(0.7, a.a, 0, 'YXZ'));
-      _m.compose(_p.set(a.x, a.y + 0.25, a.z), _q, _s.set(1, 1, 1));
-      this.stuckMesh.setMatrixAt(k++, _m);
+      const spear = a.kind === 'spear';
+      _q.setFromEuler(_e.set(spear ? 0.45 : 0.7, a.a, 0, 'YXZ'));
+      _m.compose(_p.set(a.x, a.y + (spear ? 0.55 : 0.25), a.z), _q, _s.set(1, 1, 1));
+      if (spear) { if (ks < 64) this.stuckSpears.setMatrixAt(ks++, _m); } else if (k < 256) this.stuckMesh.setMatrixAt(k++, _m);
     }
-    this.stuck = this.stuck.filter((a) => a.t < 15);
+    this.stuck = this.stuck.filter((a) => a.t < (a.kind === 'spear' ? 6 : 15));
     this.stuckMesh.count = k;
     this.stuckMesh.instanceMatrix.needsUpdate = true;
+    this.stuckSpears.count = ks;
+    this.stuckSpears.instanceMatrix.needsUpdate = true;
   }
 
   /** Semi-transparent building preview for placement. */

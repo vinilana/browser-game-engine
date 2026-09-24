@@ -20,6 +20,7 @@ export class TreeSystem {
     this.stumpGeo = buildStump();
     this.trees = [];
     this.falling = [];
+    this.shaking = [];
     // bucket trees per (region, species, variant)
     const buckets = new Map();
     list.forEach((t) => {
@@ -67,7 +68,7 @@ export class TreeSystem {
 
   _setMatrix(t, fallAngle, fallDir) {
     _p.set(t.x, t.y, t.z);
-    if (fallAngle > 0) {
+    if (fallAngle !== 0) {
       // rotate around the base toward fallDir
       const axis = new Vector3(Math.cos(fallDir + Math.PI / 2), 0, Math.sin(fallDir + Math.PI / 2));
       _q.setFromAxisAngle(axis, fallAngle).multiply(new Quaternion().setFromEuler(_e.set(0, t.rot, 0)));
@@ -83,15 +84,25 @@ export class TreeSystem {
     t.leaves.instanceMatrix.needsUpdate = true;
   }
 
-  /** First chop: the tree falls over (AoE style) and wood is taken from the log. */
+  /** An axe blow on a standing tree: the whole tree shivers away from the woodcutter. */
+  shake(t, fromX, fromZ) {
+    if (t.state !== 'standing') return;
+    t.shakeDir = Math.atan2(t.z - fromZ, t.x - fromX);
+    if (!(t.shakeT > 0)) this.shaking.push(t);
+    t.shakeT = 0.6;
+  }
+
+  /** After enough chopping the tree falls away from the woodcutter; wood is then taken from the log. */
   fell(t, fromX, fromZ) {
     if (t.state !== 'standing') return;
     t.state = 'falling';
-    t.fallDir = Math.atan2(t.z - fromZ, t.x - fromX) + (Math.random() - 0.5) * 0.6;
+    t.shakeT = 0;
+    t.fallDir = Math.atan2(t.z - fromZ, t.x - fromX) + (Math.random() - 0.5) * 0.5;
     t.fallT = 0;
     this.falling.push(t);
     this.game.audio?.treeFall(t.x, t.z);
     this.game.world.path.markCircle(t.x, t.z, t.radius, -1);
+    this.game.onTreeFelled?.(t);
   }
 
   take(t, amount) {
@@ -112,27 +123,57 @@ export class TreeSystem {
   }
 
   update(dt) {
+    for (let i = this.shaking.length - 1; i >= 0; i--) {
+      const t = this.shaking[i];
+      t.shakeT -= dt;
+      if (t.shakeT <= 0 || t.state !== 'standing') {
+        this.shaking.splice(i, 1);
+        if (t.state === 'standing') this._setMatrix(t, 0, 0);
+        continue;
+      }
+      // damped sway around the base, strongest right after the blow
+      const k = t.shakeT / 0.6;
+      this._setMatrix(t, Math.sin((0.6 - t.shakeT) * 26) * 0.045 * k * k, t.shakeDir);
+    }
     for (let i = this.falling.length - 1; i >= 0; i--) {
       const t = this.falling[i];
       t.fallT += dt;
-      const k = Math.min(1, t.fallT / 2.2);
+      const k = Math.min(1, t.fallT / 1.8);
       const ang = (Math.PI / 2 - 0.08) * k * k * k;
       if (t.state !== 'gone') this._setMatrix(t, ang, t.fallDir);
       if (k >= 1) {
         if (t.state === 'falling') t.state = 'fallen';
         this.falling.splice(i, 1);
-        this.game.particles?.dust(t.x + Math.cos(t.fallDir) * 5, t.y, t.z + Math.sin(t.fallDir) * 5, 18);
+        this.game.particles?.dust(t.x + Math.cos(t.fallDir) * 5, t.y, t.z + Math.sin(t.fallDir) * 5, 7, 3, 0.18);
       }
     }
   }
 
-  /** Where villagers stand to chop (the trunk, or the fallen log). */
-  workPoint(t) {
-    if (t.state === 'fallen' || t.state === 'falling') {
-      const d = 2.2 * t.scale;
-      return { x: t.x + Math.cos(t.fallDir) * d, z: t.z + Math.sin(t.fallDir) * d };
+  /**
+   * Where a villager stands to work and the point it faces: beside the trunk on its own side while the
+   * tree stands, then one of several slots along both sides of the fallen log (k picks another slot).
+   */
+  workPoint(t, unit = null, k = 0) {
+    if (t.state === 'standing') {
+      const a = unit ? Math.atan2(unit.z - t.z, unit.x - t.x) + k * 1.3 : k * 1.3;
+      return { x: t.x + Math.cos(a) * 1.0, z: t.z + Math.sin(a) * 1.0, fx: t.x, fz: t.z };
     }
-    return { x: t.x, z: t.z };
+    return this.logPoint(t, ((unit ? unit.id : 0) + k) % 6);
+  }
+
+  /** Work slot `slot` (0..5) along the fallen log: three positions on each side. */
+  logPoint(t, slot) {
+    const along = (1.3 + Math.floor(slot / 2) * 1.5) * Math.max(0.8, t.scale);
+    const side = slot % 2 ? 1 : -1;
+    const ax = Math.cos(t.fallDir), az = Math.sin(t.fallDir);
+    const cx = t.x + ax * along, cz = t.z + az * along;
+    return { x: cx - az * side * 0.85, z: cz + ax * side * 0.85, fx: cx, fz: cz };
+  }
+
+  /** Point on the fallen log (for picking / highlighting). */
+  logSegment(t) {
+    const len = (t.height || 8) * 0.8;
+    return [t.x, t.z, t.x + Math.cos(t.fallDir) * len, t.z + Math.sin(t.fallDir) * len];
   }
 }
 

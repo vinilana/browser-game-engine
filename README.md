@@ -144,14 +144,48 @@ afloramentos de rocha, lagos, frutas silvestres, ouro, pedra, ovelhas e cervos).
 * **Som** procedural: machado, picareta, martelo, espadas, arcos, queda de árvores, sino,
   trompas de alerta, ambiente que acompanha a câmera.
 
+### Interação contextual (botão direito)
+O cursor e uma dica ao lado dele mostram, antes do clique, o que o botão direito vai fazer com a
+seleção atual sobre aquilo que está sob o mouse (contorno tracejado na cor da ação):
+
+| Alvo | Aldeões | Soldados |
+|---|---|---|
+| Cervo | **caçar**: arremessa a lança (o cervo foge ao ser atingido e é perseguido) | abater |
+| Ovelha | **abater** com a lança | andar até ela (reúne o rebanho) |
+| Carcaça | **esquartejar** (só apodrece se ficar abandonada) | mover |
+| Árvore | **derrubar e cortar**: alguns golpes, a árvore balança, cai longe do lenhador e é cortada no tronco (cada lenhador pega uma vaga livre ao longo dele) | mover |
+| Ouro / pedra / frutas | **minerar / extrair / colher** | mover |
+| Fazenda | **cultivar** (um lavrador por campo; os outros procuram campos livres) | mover |
+| Fundação / prédio danificado | **construir / reparar** (reparo custa 50% do preço, pago aos poucos) | mover |
+| Depósito carregando recursos | **depositar** e voltar ao mesmo trabalho | mover |
+| Unidade ou prédio inimigo | atacar | **atacar** |
+| (prédio de treino selecionado) | **ponto de encontro**; num recurso, os novos aldeões já vão trabalhar | — |
+
+* **Seleção precisa**: cápsulas projetadas para unidades, raio × malha para prédios (o que está
+  atrás de uma parede não é pego), copa e tronco caído para árvores.
+* **Golpes sincronizados com a animação**: machadadas soltam lascas e folhas, a picareta faz faíscas
+  no ouro, o martelo levanta pó; espadas e lanças acertam no instante do impacto (e erram se o alvo
+  saiu do alcance); flechas e lanças saem da mão no momento certo.
+* **Retorno visual e sonoro**: o alvo da ordem pisca, bandeiras marcam o destino, linhas tracejadas
+  mostram a rota e as ordens na fila, "+10 madeira" sobe ao depositar, e cada verbo tem sua
+  confirmação sonora.
+* **Fila com Shift** (mover, construir, atacar...) e prédios em série com Shift ao posicionar.
+* **Soldados**: ataque em movimento (Q) e posturas agressiva / defensiva / manter posição (A/S/D);
+  perseguição em linha reta quando o caminho está livre.
+* **Ovelhas pastoreáveis**: passam para quem chegar perto, podem ser levadas ao Centro da Cidade e
+  roubadas se ficarem sem guarda. **Fazendas** esgotadas são replantadas automaticamente (60 de madeira).
+* O painel mostra o que cada aldeão está fazendo ("Derrubando uma árvore", "Esquartejando a caça"...)
+  e a barra do que ele carrega.
+
 ### Controles (Reinos)
 | Entrada | Ação |
 |---|---|
 | Clique esquerdo / arrastar | selecionar / seleção em caixa (Shift adiciona) |
-| Duplo clique | seleciona todas as unidades do mesmo tipo na tela |
-| Clique direito | mover / atacar / coletar / construir / depositar (conforme o alvo) |
+| Duplo clique ou Ctrl + clique | seleciona todas as unidades do mesmo tipo na tela |
+| Clique direito | ação contextual (veja a tabela acima); Shift + clique direito enfileira |
 | Q W E R T · A S D F G · Z X C V B | atalhos da grade de comandos (construir, treinar, parar, excluir) |
-| Shift ao posicionar | continua posicionando o mesmo edifício |
+| Shift ao posicionar | continua posicionando o mesmo edifício (os aldeões constroem em sequência) |
+| Q · A / S / D (soldados) | ataque em movimento · posturas agressiva / defensiva / manter posição |
 | Ctrl + 0–9 / 0–9 | define / seleciona grupo (2× centraliza a câmera) |
 | H | seleciona o Centro da Cidade · `.` próximo aldeão ocioso · Espaço centraliza a seleção |
 | Del | exclui a seleção |
@@ -166,6 +200,7 @@ Desempenho medido (RTX 4060 via WSL2, 1920×1080, preset Alta, ~85 unidades e ~5
 após 30 min de partida simulada): ~6–8 ms por frame (~125 FPS), ~500–950 draw calls.
 
 ### Adições à engine feitas para o RTS
+* `ai/Pathfinder.lineFree` — teste de linha livre usado na perseguição direta.
 * `camera/RTSCamera` — câmera orbital de estratégia (pan por bordas/setas, zoom com pitch
   progressivo, rotação, limites, seguir o terreno).
 * `terrain/Heightfield` + `terrain/TerrainRenderer` — terreno por heightfield com splatting de
@@ -255,7 +290,8 @@ src/engine/
   audio/       AudioEngine
 src/game/      VoxelCraft: main, blocks, textures, worldgen, Player, Interaction, Hand, ui, icons, ambience, mobs, storage
 src/rts/       Reinos: main, config, mapgen, world, vegetation, entities, game (simulação), ai, render,
-               controls, ui, icons, audio, assets, textures, rts.worker, models/ (prédios, árvores, unidades)
+               controls (seleção e ações contextuais), cursors, ui, icons, audio, assets, textures,
+               rts.worker, models/ (prédios, árvores, unidades)
 src/sandbox/   exemplo mínimo da engine sem voxels
 src/tools/     laboratório de texturas
 ```

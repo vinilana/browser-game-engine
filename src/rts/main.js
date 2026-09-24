@@ -65,10 +65,11 @@ class RTSGame {
           <label>Qualidade gráfica<select id="mQual"><option value="low">Baixa</option><option value="medium">Média</option><option value="high">Alta</option><option value="ultra">Ultra</option></select></label>
           <button id="mStart" class="primary">Começar partida</button>
           <details><summary>Como jogar</summary>
-            <p><b>Botão esquerdo</b> seleciona (arraste para selecionar vários) · <b>botão direito</b> dá ordens: mover, coletar, construir, atacar.</p>
+            <p><b>Botão esquerdo</b> seleciona (arraste para vários, duplo clique ou Ctrl+clique para todos do mesmo tipo) · <b>botão direito</b> age sobre o que está sob o cursor: o ícone e a dica mostram a ação (caçar, cortar, minerar, colher, esquartejar, cultivar, construir, reparar, depositar, atacar).</p>
+            <p><b>Shift</b> + botão direito enfileira ordens · <b>Shift</b> ao posicionar um prédio coloca vários seguidos · soldados: <b>Q</b> ataque em movimento, <b>A/S/D</b> posturas.</p>
             <p><b>Setas / bordas da tela</b> movem a câmera · <b>roda</b> zoom · <b>botão do meio</b> ou <b>PgUp/PgDn</b> giram.</p>
-            <p><b>Q W E R T / A S D F G</b> atalhos da grade de comandos · <b>H</b> Centro da Cidade · <b>.</b> aldeão ocioso · <b>Ctrl+1–9</b> grupos · <b>Del</b> excluir · <b>Esc/F10</b> menu.</p>
-            <p>Colete comida, madeira, ouro e pedra; construa casas para aumentar a população, avance de era e destrua todas as construções inimigas.</p>
+            <p><b>H</b> Centro da Cidade · <b>.</b> aldeão ocioso · <b>Ctrl+1–9</b> grupos · <b>Del</b> excluir · <b>Esc/F10</b> menu.</p>
+            <p>Ovelhas seguem quem chegar perto delas; leve-as ao Centro da Cidade. Colete comida, madeira, ouro e pedra, construa casas, avance de era e destrua as construções inimigas.</p>
           </details>
         </div>
       </div>`, 'menuScreen');
@@ -110,13 +111,13 @@ class RTSGame {
     for (const t of this.trees.trees) this.world.path.markCircle(t.x, t.z, 0.6, 1);
     if (this.settings.get('preset') !== 'low') this.cover = new GroundCover(this, map.splat, map.size + 1);
     this.particles = new ParticleSystem(e.pipeline, { world: null, max: 3000 });
-    this.particles.dust = (x, y, z, n = 12, spread = 2) => {
+    this.particles.dust = (x, y, z, n = 12, spread = 2, alpha = 0.35) => {
       for (let k = 0; k < n; k++) {
         this.particles.emit({
           position: [x + (Math.random() - 0.5) * spread, y + 0.3, z + (Math.random() - 0.5) * spread],
           velocity: [(Math.random() - 0.5) * 1.5, 0.6 + Math.random(), (Math.random() - 0.5) * 1.5],
           life: 2 + Math.random() * 1.5, size: 0.5 + Math.random() * 0.5, grow: 2.2, drag: 0.8,
-          color: [0.55, 0.48, 0.38, 0.35],
+          color: [0.5, 0.44, 0.35, alpha],
         });
       }
     };
@@ -239,25 +240,114 @@ class RTSGame {
       }
     }
   }
-  onGatherTick(u, kind) {
-    if (u.owner !== 0 && !this.sim.isVisibleTo(0, u.x, u.z)) return;
-    if (kind === 'tree') this.audio.chop(u.x, u.z);
-    else if (kind === 'gold' || kind === 'stone') this.audio.mine(u.x, u.z);
-    else this.audio.forage(u.x, u.z);
-    if (kind === 'tree' && Math.random() < 0.5) {
-      this.particles.emit({ position: [u.x + Math.sin(u.heading) * 0.6, u.y + 0.5, u.z + Math.cos(u.heading) * 0.6], velocity: [(Math.random() - 0.5) * 2, 1.5, (Math.random() - 0.5) * 2], gravity: 9, life: 0.8, size: 0.05, color: [0.75, 0.6, 0.4, 1] });
+  onGatherTick() {}
+  onBuildTick() {}
+
+  /** Short-lived debris (wood chips, sparks, clods). */
+  _chips(x, y, z, color, n, speed = 2, size = 0.05, emissive = 0) {
+    for (let k = 0; k < n; k++) {
+      this.particles.emit({
+        position: [x, y, z],
+        velocity: [(Math.random() - 0.5) * speed, speed * (0.5 + Math.random() * 0.6), (Math.random() - 0.5) * speed],
+        gravity: 9, drag: 0.4, life: 0.45 + Math.random() * 0.45, size: size * (0.7 + Math.random() * 0.6),
+        spin: (Math.random() - 0.5) * 12, color, emissive,
+      });
     }
   }
-  onBuildTick(u, b) {
-    u._hammerT = (u._hammerT || 0) + this.engine.frameTime * this.speed;
-    if (u._hammerT > 0.45) { u._hammerT = 0; if (b.owner === 0 || this.sim.isVisibleTo(0, b.x, b.z)) this.audio.hammer(u.x, u.z); }
+
+  /** A work blow lands (synchronised with the animation): sound and debris at the point of contact. */
+  onStrike(u, kind, t) {
+    if (!this.sim.isVisibleTo(0, u.x, u.z)) return;
+    const fx = u.x + Math.sin(u.heading) * 0.75, fz = u.z + Math.cos(u.heading) * 0.75;
+    switch (kind) {
+      case 'chop': {
+        this.audio.chop(u.x, u.z);
+        const standing = t && t.state === 'standing';
+        this._chips(fx, u.y + (standing ? 1.0 : 0.35), fz, [0.8, 0.64, 0.42, 1], 5, 2.2, 0.045);
+        if (standing) {
+          this.trees.shake(t, u.x, u.z);
+          // a few leaves shaken loose from the crown drift down
+          for (let k = 0; k < 2; k++) {
+            this.particles.emit({
+              position: [t.x + (Math.random() - 0.5) * 3, t.y + (t.height || 8) * (0.55 + Math.random() * 0.3), t.z + (Math.random() - 0.5) * 3],
+              velocity: [(Math.random() - 0.5) * 0.8, -0.2, (Math.random() - 0.5) * 0.8], gravity: 0.35, drag: 1.5, life: 3.5,
+              size: 0.08, spin: 3, color: [0.34, 0.44, 0.16, 1],
+            });
+          }
+        }
+        break;
+      }
+      case 'gold': case 'stone':
+        this.audio.mine(u.x, u.z);
+        if (kind === 'gold') this._chips(fx, u.y + 0.5, fz, [1, 0.78, 0.3, 1], 4, 2.6, 0.03, 8);
+        this._chips(fx, u.y + 0.5, fz, kind === 'gold' ? [0.58, 0.5, 0.32, 1] : [0.62, 0.6, 0.57, 1], 3, 1.8, 0.05);
+        break;
+      case 'hammer':
+        this.audio.hammer(u.x, u.z);
+        this._chips(fx, u.y + 0.8, fz, [0.72, 0.62, 0.48, 0.8], 2, 1.2, 0.04);
+        break;
+      case 'berry':
+        this.audio.forage(u.x, u.z);
+        if (Math.random() < 0.5) this._chips(fx, u.y + 0.7, fz, [0.3, 0.42, 0.15, 1], 1, 0.8, 0.05);
+        break;
+      case 'farm':
+        this.audio.hoe(u.x, u.z);
+        this._chips(fx, u.y + 0.1, fz, [0.36, 0.27, 0.18, 1], 3, 1.4, 0.05);
+        break;
+      case 'carcass':
+        this.audio.butcher(u.x, u.z);
+        break;
+      default:
+    }
   }
   onMeleeHit(u, t) {
-    if (u.owner === 0 || this.sim.isVisibleTo(0, u.x, u.z)) {
-      if (u.isVillager && t.isAnimal) this.audio.chop(u.x, u.z); else this.audio.clash(u.x, u.z);
+    if (!this.sim.isVisibleTo(0, t.x, t.z)) return;
+    const metal = t.isUnit && !t.isAnimal && !t.isVillager && !u.isVillager;
+    if (t.isBuilding) this.audio.thud(u.x, u.z, 0.8);
+    else if (metal) this.audio.clash(t.x, t.z);
+    else this.audio.thud(t.x, t.z, t.isAnimal ? 0.7 : 1);
+    const y = t.isBuilding ? u.y + 1 : t.y + (t.isAnimal ? 0.6 : 1.1);
+    const x = t.isBuilding ? u.x + Math.sin(u.heading) * 0.8 : t.x, z = t.isBuilding ? u.z + Math.cos(u.heading) * 0.8 : t.z;
+    if (metal) this._chips(x, y, z, [1, 0.85, 0.5, 1], 3, 2.4, 0.025, 7);
+    this.particles.emit({ position: [x, y, z], velocity: [0, 0.3, 0], life: 0.6, size: 0.3, grow: 1.5, drag: 1, color: [0.55, 0.5, 0.42, 0.25] });
+  }
+  onWhiff(u) { if (this.sim.isVisibleTo(0, u.x, u.z)) this.audio.whiff(u.x, u.z); }
+  onFire(from, kind) {
+    if (!this.sim.isVisibleTo(0, from.x, from.z)) return;
+    if (kind === 'spear') this.audio.spearThrow(from.x, from.z); else this.audio.bowShot(from.x, from.z);
+  }
+  onProjectileHit(p, t) {
+    if (t.isUnit && this.sim.isVisibleTo(0, t.x, t.z)) this.audio.thud(t.x, t.z, p.kind === 'spear' ? 0.9 : 0.35);
+  }
+  onUnitDied(u) {
+    if (u.isAnimal && this.sim.isVisibleTo(0, u.x, u.z)) this.audio.thud(u.x, u.z, 0.6);
+  }
+  onHerdConverted(a, from, to) {
+    if (to === 0) {
+      this.audio.baa(a.x, a.z);
+      if (this.audio._throttle('herdMsg', 25000)) this.hud.notice('Ovelhas reunidas! Leve-as para perto do Centro da Cidade.', 3500);
+    } else if (from === 0 && this.audio._throttle('herdLost', 12000)) {
+      this.hud.notice('O inimigo levou uma das suas ovelhas!', 3000);
+      this.audio.error();
     }
   }
-  onFire(from) { if (this.sim.isVisibleTo(0, from.x, from.z)) this.audio.bowShot(from.x, from.z); }
+  onFarmReseeded(b) {
+    if (b.owner === 0 && this.audio._throttle('reseed', 5000)) this.hud.notice('Fazenda replantada (−60 de madeira)');
+  }
+  onFarmExhausted(b) {
+    if (b.owner === 0) { this.hud.notice('Uma fazenda se esgotou: falta madeira para replantar', 3000); this.audio.error(); }
+  }
+  onRepaired(b) {
+    if (b.owner === 0 && this.audio._throttle('repaired', 3000)) this.hud.notice(`${b.def.label} reparado(a)`);
+  }
+  onRepairStalled(u, b, res) {
+    if (u.owner === 0 && this.audio._throttle('repairStall', 4000)) { this.hud.notice(`Sem ${RES_LABEL[res].toLowerCase()} para continuar o reparo`); this.audio.error(); }
+  }
+  onDeposit(u, b, res, amount) {
+    if (u.owner !== 0 || !amount || !this.sim.isVisibleTo(0, u.x, u.z)) return;
+    const css = { food: '#ff9a7a', wood: '#e8b77a', gold: '#ffd84a', stone: '#d6d0c6' }[res] || '#fff';
+    this.hud.floatText(u.x, u.y + 0.6, u.z, `+${Math.floor(amount)} ${RES_LABEL[res].toLowerCase()}`, css);
+  }
   onBuildingDestroyed(b) { if (this.sim.isVisibleTo(0, b.x, b.z) || b.owner === 0) this.audio.collapse(b.x, b.z); }
   onResourceDepleted() {}
   onGameOver(winner) {

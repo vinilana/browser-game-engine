@@ -1,7 +1,7 @@
 // Game entities for "Reinos": units (villagers, soldiers, animals), buildings,
 // resource nodes and projectiles, with their behaviour state machines.
-import { UNITS, BUILDINGS, RESOURCES, GATHER_RATE, CARRY, BUILD_RATE, damage, GRID } from './config.js';
-import { ANIM, TOOL_BIT } from './models/units.js';
+import { UNITS, BUILDINGS, RESOURCES, GATHER_RATE, CARRY, BUILD_RATE, HUNT, FELL_TIME, REPAIR, MAP_SIZE, damage, GRID } from './config.js';
+import { ANIM, TOOL_BIT, IMPACT } from './models/units.js';
 
 let NEXT_ID = 1;
 
@@ -42,7 +42,7 @@ export class ResourceNode extends Entity {
   workPoint(unit, k = 0) {
     const a = (unit.id * 2.39996 + k * 1.9) % (Math.PI * 2);
     const r = this.radius + unit.def.radius + 0.35;
-    return { x: this.x + Math.cos(a) * r, z: this.z + Math.sin(a) * r };
+    return { x: this.x + Math.cos(a) * r, z: this.z + Math.sin(a) * r, fx: this.x, fz: this.z };
   }
 }
 
@@ -141,6 +141,13 @@ export class Building extends Entity {
 }
 
 // ---------------------------------------------------------------------------
+const WORK_TOOLS = TOOL_BIT.axe | TOOL_BIT.pick | TOOL_BIT.hammer | TOOL_BIT.basket | TOOL_BIT.spear;
+// animation phases (0..1) where a work blow lands: axe/pick, hammer (two per cycle), hands
+const CHOP_IMPACTS = [0.62];
+const BUILD_IMPACTS = [0.125, 0.625];
+const FORAGE_IMPACTS = [0.5];
+const IDLE_RESULT = { moving: false, workAnim: null };
+
 export class Unit extends Entity {
   constructor(game, kind, owner, x, z) {
     super(game, kind, owner, x, z);
@@ -154,16 +161,21 @@ export class Unit extends Entity {
     this.pathIdx = 0;
     this.goal = null;
     this.order = null;       // {type, target, x, z, ...}
+    this.queue = [];         // orders queued with Shift
+    this.lastWork = null;    // where to resume after a manual drop-off
     this.state = 'idle';
-    this.carry = { res: null, amount: 0 };
+    this.carry = { res: null, amount: 0, kind: null };
     this.anim = ANIM.IDLE;
     this.phase = Math.random();
     this.cooldown = 0;
+    this.swing = null;       // attack in progress: the blow lands / missile leaves at `impact`
     this.thinkT = Math.random();
+    this.herdT = Math.random() * 0.5;
     this.repathT = 0;
     this.deadT = 0;
+    this.hitT = 0;
     this.tools = 0;
-    this.stance = 'aggressive';
+    this.stance = 'aggressive';   // aggressive | defensive | ground
     this.isAnimal = !!(this.def.classes && this.def.classes.includes('animal'));
     this.isVillager = kind === 'villager';
     this.isMilitary = !this.isVillager && !this.isAnimal;
@@ -172,12 +184,27 @@ export class Unit extends Entity {
   }
 
   // ---- orders ---------------------------------------------------------------
+  /** Order from a player or the AI: replaces current plans, or is appended when queued (Shift). */
+  issue(order, queued = false) {
+    if (queued && (this.order || this.queue.length)) { this.queue.push(order); return; }
+    this.queue.length = 0;
+    this.command(order);
+  }
+
+  /** Drops the current order and everything queued. */
+  stop() { this.queue.length = 0; this.command(null); }
+
+  /** Switches the active order; finishing one (null) starts the next queued order. */
   command(order) {
+    if (!order && this.queue.length) order = this.queue.shift();
     this.order = order;
     this.path = null;
     this.goal = null;
+    this.swing = null;
+    this.spearGone = false;
     this.state = order ? order.type : 'idle';
-    if (order && order.type !== 'gather' && order.type !== 'build') this.tools &= ~(TOOL_BIT.axe | TOOL_BIT.pick | TOOL_BIT.hammer | TOOL_BIT.basket);
+    const keepsTools = order && (order.type === 'gather' || order.type === 'build' || order.type === 'repair' || (order.type === 'attack' && this.isVillager));
+    if (!keepsTools) this.tools &= ~WORK_TOOLS;
   }
 
   moveTo(x, z) {
@@ -249,6 +276,23 @@ export class Unit extends Entity {
     return moving || moved > 0.002;
   }
 
+  /** Closes in on a (possibly moving) point: straight at it when the way is clear, A* otherwise. */
+  _chase(tx, tz, dt, arrive, direct) {
+    const P = this.game.world.path;
+    if (direct && Math.hypot(tx - this.x, tz - this.z) < 14 && P.lineFree(this.x, this.z, tx, tz)) {
+      this.goal = { x: tx, z: tz, arrive };
+      this.path = [[tx, tz]];
+      this.pathIdx = 0;
+    } else {
+      this.repathT -= dt;
+      const drift = this.goal ? Math.hypot(this.goal.x - tx, this.goal.z - tz) : Infinity;
+      if (!this.path || this.repathT <= 0 || drift > 4) { this.repathT = 0.8; this.goal = null; this.goTo(tx, tz, arrive); }
+    }
+    const moving = this._steer(dt);
+    if (!this.path && !moving) this.goal = null;
+    return moving;
+  }
+
   face(x, z) {
     const want = Math.atan2(x - this.x, z - this.z);
     let dh = want - this.heading;
@@ -260,8 +304,21 @@ export class Unit extends Entity {
     if (!this.alive) return;
     this.hp -= n;
     this.lastHitBy = from;
+    this.hitT = 0.3;
     this.game.onDamaged?.(this, from);
-    if (this.hp <= 0) this.game.killUnit(this);
+    if (this.hp <= 0) { this.game.killUnit(this); return; }
+    if (this.isAnimal) {
+      // wild deer bolt away from whoever hurt them
+      if (this.kind === 'deer' && from) { this.fleeFrom = from; this.fleeGoal = null; }
+      return;
+    }
+    if (!from || !from.alive || from.owner === this.owner || this.order) return;
+    // idle soldiers answer back, idle villagers get out of the way
+    if (this.isMilitary && this.stance !== 'ground') this.command({ type: 'attack', target: from, auto: true, home: { x: this.x, z: this.z } });
+    else if (this.isVillager && from.isUnit) {
+      const a = Math.atan2(this.z - from.z, this.x - from.x);
+      this.command({ type: 'move', x: this.x + Math.cos(a) * 8, z: this.z + Math.sin(a) * 8 });
+    }
   }
 
   // ---- behaviour --------------------------------------------------------------
@@ -273,115 +330,304 @@ export class Unit extends Entity {
     }
     this.cooldown -= dt;
     this.thinkT -= dt;
+    if (this.hitT > 0) this.hitT -= dt;
     const o = this.order;
     let moving = false;
     let workAnim = null;
 
     if (this.isAnimal) {
-      moving = this._animal(dt);
+      moving = this.owner >= 0 && o && o.type === 'move' ? this._move(dt, o) : this._animal(dt);
     } else if (!o) {
-      // idle: soldiers look for enemies, villagers stay put
+      // idle: soldiers look for enemies (per stance), villagers stay put
       if (this.isMilitary && this.thinkT <= 0) {
         this.thinkT = 0.5;
-        const e = this.game.findEnemy(this, this.def.los);
+        const e = this._scan();
         if (e) this.command({ type: 'attack', target: e, auto: true, home: { x: this.x, z: this.z } });
       }
       moving = this._steer(dt);
     } else if (o.type === 'move') {
-      if (!this.goal) this.goTo(o.x, o.z, o.arrive ?? 0.6);
-      moving = this._steer(dt);
-      if (!this.path && this.arrived()) this.command(null);
-      else if (!this.path) this.command(null);
+      moving = this._move(dt, o);
     } else if (o.type === 'attack') {
       ({ moving, workAnim } = this._attack(dt, o));
     } else if (o.type === 'gather') {
       ({ moving, workAnim } = this._gather(dt, o));
     } else if (o.type === 'build') {
       ({ moving, workAnim } = this._build(dt, o));
+    } else if (o.type === 'repair') {
+      ({ moving, workAnim } = this._repair(dt, o));
     } else if (o.type === 'dropoff') {
       ({ moving } = this._dropoff(dt, o));
     }
 
     // animation
     if (moving) {
-      this.anim = this.carry.amount > 0 && this.isVillager ? ANIM.CARRY : (this.def.speed > 2.7 && this.path ? ANIM.RUN : ANIM.WALK);
       if (this.isAnimal) this.anim = this.state === 'flee' ? ANIM.RUN : ANIM.WALK;
+      else this.anim = this.carry.amount > 0 && this.isVillager ? ANIM.CARRY : (this.def.speed > 2.7 && this.path ? ANIM.RUN : ANIM.WALK);
     } else if (workAnim !== null) {
       this.anim = workAnim;
     } else {
       this.anim = this.isAnimal ? ANIM.GRAZE : ANIM.IDLE;
       this.phase = (this.phase + dt * 0.25) % 1;
     }
-    // what is visible in the hands
+    // what is visible in the hands / on the back
     let mask = this.tools;
-    if (this.carry.amount > 0) mask |= this.carry.res === 'wood' ? TOOL_BIT.wood : this.carry.res === 'food' ? TOOL_BIT.food : TOOL_BIT.sack;
+    if (this.carry.amount > 0) {
+      const c = this.carry;
+      mask |= c.res === 'wood' ? TOOL_BIT.wood : c.res === 'food' ? (c.kind === 'carcass' ? TOOL_BIT.meat : TOOL_BIT.food) : TOOL_BIT.sack;
+    }
+    if (this.spearGone) mask &= ~TOOL_BIT.spear;
     this.mask = mask;
   }
 
-  _workTick(dt, cycle) {
-    this.phase = (this.phase + dt / cycle) % 1;
+  /** Advances a work animation and reports the blows (for sounds, chips, sparks...). */
+  _workTick(dt, cycle, impacts = null, strike = null, target = null) {
+    const p0 = this.phase;
+    const p1 = (p0 + dt / cycle) % 1;
+    this.phase = p1;
+    if (!impacts) return;
+    for (const i of impacts) {
+      if (p0 <= p1 ? (p0 < i && p1 >= i) : (p0 < i || p1 >= i)) { this.game.onStrike?.(this, strike, target); break; }
+    }
+  }
+
+  /** Enemy worth engaging, given the stance. */
+  _scan() {
+    const r = this.stance === 'ground' ? (this.def.range > 2 ? this.def.range : 1.6) + this.def.radius
+      : this.stance === 'defensive' ? Math.min(this.def.los, 9) : this.def.los;
+    return this.game.findEnemy(this, r);
+  }
+
+  _move(dt, o) {
+    // attack-move: engage anything met on the way, then carry on
+    if (o.attackMove && this.isMilitary && this.thinkT <= 0) {
+      this.thinkT = 0.4;
+      const e = this.game.findEnemy(this, this.def.los);
+      if (e) {
+        this.queue.unshift(o);
+        this.command({ type: 'attack', target: e, auto: true });
+        return false;
+      }
+    }
+    if (!this.goal) this.goTo(o.x, o.z, o.arrive ?? 0.6);
+    const moving = this._steer(dt);
+    if (!this.path) {
+      if (this.isAnimal) this.home = { x: this.x, z: this.z };
+      this.command(null);
+    }
+    return moving;
+  }
+
+  /** Distance to a target (buildings: to the footprint) and the reach needed to hit it. */
+  _reach(t, reachR) {
+    if (t.isBuilding) {
+      const h = t.size / 2;
+      return [Math.hypot(Math.max(0, Math.abs(t.x - this.x) - h), Math.max(0, Math.abs(t.z - this.z) - h)), reachR + 0.3];
+    }
+    return [this.dist(t), reachR + (t.def?.radius || 0.4)];
+  }
+
+  _attack(dt, o) {
+    const g = this.game;
+    const t = o.target;
+    const hunting = !!o.hunt;
+    if (!(t && t.alive && (t.isUnit || t.isBuilding))) {
+      // the quarry is down: butcher it
+      if (hunting && this.isVillager && t && t.carcass && t.carcass.alive) {
+        this.command({ type: 'gather', target: t.carcass, kind: 'carcass', species: t.kind });
+        return IDLE_RESULT;
+      }
+      // soldiers pick the next enemy nearby, otherwise the order is done
+      const e = this.isMilitary && !hunting && this.stance !== 'ground' ? this._scan() : null;
+      if (e) { o.target = e; this.goal = null; this.swing = null; return IDLE_RESULT; }
+      this.command(null);
+      return IDLE_RESULT;
+    }
+    const throwing = this.isVillager && hunting && t.kind === 'deer';
+    const ranged = this.def.range > 2 || throwing;
+    if (this.isVillager) this.tools = TOOL_BIT.spear;
+    const reachR = (throwing ? HUNT.throwRange : this.def.range > 2 ? this.def.range : 0.9 + (this.def.range || 0)) + this.def.radius;
+    const [d, range] = this._reach(t, reachR);
+    // stances / leash for targets picked up automatically
+    if (o.auto) {
+      if (this.stance === 'ground' && d > range && !this.swing) { this.command(null); return IDLE_RESULT; }
+      if (o.home) {
+        const leash = this.stance === 'defensive' ? 10 : this.def.los * 1.6;
+        if (Math.hypot(this.x - o.home.x, this.z - o.home.z) > leash) { this.command({ type: 'move', x: o.home.x, z: o.home.z }); return IDLE_RESULT; }
+      }
+    }
+    if (d > range && !this.swing) {
+      this.spearGone = false;
+      const p = t.isBuilding ? t.edgePoint(this) : t;
+      return { moving: this._chase(p.x, p.z, dt, Math.max(0.5, range * 0.8), t.isUnit), workAnim: null };
+    }
+    this.goal = null; this.path = null; this.vx = this.vz = 0;
+    this.face(t.x, t.z);
+    const anim = throwing ? ANIM.THROW : ranged ? ANIM.SHOOT : (this.kind === 'spearman' || this.isVillager) ? ANIM.THRUST : ANIM.ATTACK;
+    const period = 1 / (hunting && this.isVillager ? HUNT.rate : (this.def.rate || 0.5));
+    if (!this.swing && this.cooldown <= 0) {
+      this.swing = { t: 0, dur: period, impact: IMPACT[anim] ?? 0.5, hit: false };
+      this.cooldown = period;
+    }
+    const sw = this.swing;
+    if (sw) {
+      sw.t += dt;
+      const k = sw.t / sw.dur;
+      if (!sw.hit && k >= sw.impact) { sw.hit = true; this._strike(t, ranged, throwing, reachR); }
+      this.phase = Math.min(0.999, k);
+      this.spearGone = throwing && sw.hit && k < 0.92;
+      if (k >= 1) this.swing = null;
+    } else {
+      this.phase = 0;
+      this.spearGone = false;
+    }
+    return { moving: false, workAnim: anim };
+  }
+
+  /** The moment a blow lands or a missile is released. */
+  _strike(t, ranged, throwing, reachR) {
+    const g = this.game;
+    if (!t.alive) return;
+    if (ranged) {
+      const origin = { x: this.x + Math.sin(this.heading) * 0.3, y: this.y + (throwing ? 1.75 : 1.5), z: this.z + Math.cos(this.heading) * 0.3 };
+      g.fireProjectile(this, t, origin, throwing ? { kind: 'spear', dmg: HUNT.throwDamage } : undefined);
+      return;
+    }
+    // melee: lands only if the target is still within reach
+    const [d, range] = this._reach(t, reachR);
+    if (d > range + 0.7) { g.onWhiff?.(this, t); return; }
+    const dmg = this.isVillager && t.isAnimal ? HUNT.stabDamage : damage(this, t);
+    if (t.isUnit) t.takeDamage(dmg, this); else g.damageBuilding(t, dmg * (this.isVillager ? 1 : 0.8), this);
+    g.onMeleeHit?.(this, t);
+  }
+
+  /** What to do after a resource runs out: the same kind nearby, the next animal of the herd... */
+  _nextWork(o) {
+    const g = this.game;
+    const x = o.lastX ?? this.x, z = o.lastZ ?? this.z;
+    const kind = o.kind;
+    if (kind === 'carcass') {
+      const c = g.findResource('carcass', x, z, 12, this);
+      if (c) return { type: 'gather', target: c, kind: 'carcass', species: c.species };
+      const a = g.findHuntable(this, x, z, 18, o.species);
+      return a ? { type: 'attack', target: a, hunt: true } : null;
+    }
+    if (kind === 'farm') {
+      const f = g.findResource('farm', x, z, 24, this);
+      return f ? { type: 'gather', target: f, kind: 'farm' } : null;
+    }
+    if (!kind) return null;
+    const n = g.findResource(kind, x, z, kind === 'tree' ? 16 : 20, this);
+    return n ? { type: 'gather', target: n, kind } : null;
+  }
+
+  /** Farmers move around their field every few seconds. */
+  _farmSpot(dt, o, f) {
+    o.spotT = (o.spotT ?? 0) - dt;
+    if (!o.farmSpot || (o.spotT <= 0 && o.working)) {
+      const h = f.size / 2 - 1.2;
+      o.farmSpot = { x: f.x + (Math.random() * 2 - 1) * h, z: f.z + (Math.random() * 2 - 1) * h };
+      o.spotT = 4 + Math.random() * 4;
+      o.working = false;
+    }
+    return { x: o.farmSpot.x, z: o.farmSpot.z, fx: o.farmSpot.x + Math.sin(this.heading), fz: o.farmSpot.z + Math.cos(this.heading) };
   }
 
   _gather(dt, o) {
     const g = this.game;
-    let t = o.target;
+    const t = o.target;
     const isTree = t && t.type === 'tree';
-    const alive = t && (isTree ? t.amount > 0 : t.alive !== false && (t.amount > 0 || (t.isBuilding && t.food > 0)));
+    const alive = t && (isTree ? t.amount > 0 : t.isBuilding ? t.alive && t.food > 0 : t.alive !== false && t.amount > 0);
     if (!alive) {
-      // find another resource of the same kind nearby
-      const kind = o.kind;
-      const next = kind ? g.findResource(kind, o.lastX ?? this.x, o.lastZ ?? this.z, 18, this) : null;
-      if (next) { o.target = next; t = next; this.goal = null; this.path = null; }
-      else if (this.carry.amount > 0) { this.command({ type: 'dropoff', then: null }); return { moving: false, workAnim: null }; }
-      else { this.command(null); return { moving: false, workAnim: null }; }
+      const next = this._nextWork(o);
+      if (next) this.command(next);
+      else if (this.carry.amount > 0) this.command({ type: 'dropoff', then: null });
+      else this.command(null);
+      return IDLE_RESULT;
     }
-    o.kind = isTree ? 'tree' : t.isBuilding ? 'farm' : t.type;
+    const kind = isTree ? 'tree' : t.isBuilding ? 'farm' : t.type;
+    o.kind = kind;
     o.lastX = t.x; o.lastZ = t.z;
+    this.lastWork = { type: 'gather', target: t, kind, lastX: t.x, lastZ: t.z, species: o.species };
     const res = isTree ? 'wood' : t.isBuilding ? 'food' : t.res;
-    if (this.carry.res && this.carry.res !== res && this.carry.amount > 0) this.carry = { res: null, amount: 0 };
+    if (this.carry.amount > 0 && this.carry.res !== res) this.carry = { res: null, amount: 0, kind: null };
     // tool for the job
-    this.tools = o.kind === 'tree' ? TOOL_BIT.axe : (o.kind === 'gold' || o.kind === 'stone') ? TOOL_BIT.pick : (o.kind === 'berry' || o.kind === 'farm') ? TOOL_BIT.basket : 0;
+    this.tools = kind === 'tree' ? TOOL_BIT.axe : (kind === 'gold' || kind === 'stone') ? TOOL_BIT.pick : (kind === 'berry' || kind === 'farm') ? TOOL_BIT.basket : 0;
     if (this.carry.amount >= CARRY) {
-      this.command({ type: 'dropoff', then: { type: 'gather', target: t, kind: o.kind } });
-      return { moving: false, workAnim: null };
+      this.command({ type: 'dropoff', then: { type: 'gather', target: t, kind, lastX: t.x, lastZ: t.z, species: o.species } });
+      return IDLE_RESULT;
     }
-    // walk to the work spot
+    // a tree on its way down: keep clear and watch it fall
+    if (isTree && t.state === 'falling') {
+      this.goal = null; this.path = null; this.vx = this.vz = 0;
+      this.face(t.x, t.z);
+      this.phase = (this.phase + dt * 0.25) % 1;
+      o.working = false;
+      return IDLE_RESULT;
+    }
+    // where to stand and what to face
     let wp;
-    if (isTree) wp = g.trees.workPoint(t);
-    else if (t.isBuilding) wp = o.farmSpot || (o.farmSpot = { x: t.x + (Math.random() - 0.5) * 6, z: t.z + (Math.random() - 0.5) * 6 });
-    else wp = t.workPoint(this, o.side || 0);
-    const reach = isTree ? (t.state === 'standing' ? 1.5 : 1.8) : t.isBuilding ? 1.0 : t.radius + this.def.radius + 0.9;
-    const d = Math.hypot(wp.x - this.x, wp.z - this.z);
-    const dCenter = Math.hypot(t.x - this.x, t.z - this.z);
-    // close enough when the exact work spot can't be reached (crowded bushes, buildings in the way)
-    const nearEnough = !isTree && !t.isBuilding && o.blockedT > 0.6 && dCenter < t.radius + this.def.radius + 2.6;
-    if (d > reach && !nearEnough && !(isTree && t.state === 'standing' && dCenter < 1.8)) {
-      if (!this.goal || this.repathT <= 0) {
-        const ok = this.goTo(wp.x, wp.z, reach * 0.6);
-        this.repathT = 3;
-        if (!ok) {
-          // unreachable side: try another one, then give up on this node
-          o.side = (o.side || 0) + 1;
-          if (o.side > 5) {
-            const skip = (this._skip ||= new Set());
-            skip.add(t);
-            const next = g.findResource(o.kind, t.x, t.z, 24, this);
-            this.command(next ? { type: 'gather', target: next, kind: o.kind } : (this.carry.amount > 0 ? { type: 'dropoff', then: null } : null));
-            return { moving: false, workAnim: null };
-          }
+    if (isTree && t.state === 'fallen') {
+      // nearest free slot along the log that nobody else is using (forests are crowded)
+      const P = g.world.path;
+      if (o.slot === undefined || o.slotTree !== t || (o.side || 0) !== (o.slotSide || 0)) {
+        let bestK = 0, bd = Infinity;
+        for (let k = 0; k < 6; k++) {
+          const p = g.trees.logPoint(t, k);
+          if (!P.isFreeAt(p.x, p.z)) continue;
+          let d = Math.hypot(p.x - this.x, p.z - this.z);
+          for (const u of g.unitsNear(p.x, p.z, 3)) if (u !== this && u.order?.target === t && u.order.slot === k) d += 6;
+          if (k === o.slot && o.slotTree === t) d += 4 * (o.side || 0);   // blocked before: prefer another
+          if (d < bd) { bd = d; bestK = k; }
         }
+        o.slot = bestK; o.slotTree = t; o.slotSide = o.side || 0;
+      }
+      wp = g.trees.logPoint(t, o.slot);
+    } else if (isTree) wp = g.trees.workPoint(t, this, o.side || 0);
+    else if (t.isBuilding) wp = this._farmSpot(dt, o, t);
+    else wp = t.workPoint(this, o.side || 0);
+    const d = Math.hypot(wp.x - this.x, wp.z - this.z);
+    const dFace = Math.hypot(wp.fx - this.x, wp.fz - this.z);
+    const armReach = isTree ? (t.state === 'standing' ? 1.8 : 1.5) : t.radius + this.def.radius + 1.0;
+    const working = o.working && (t.isBuilding ? d < 1.2 : dFace < armReach + 0.5);
+    // good enough when the exact spot is crowded / blocked but the work is within reach
+    const nearEnough = !t.isBuilding && o.blockedT > 0.5 && dFace < armReach + 0.6;
+    if (!working && d > 0.7 && !nearEnough) {
+      o.working = false;
+      if (!this.goal || this.repathT <= 0) {
+        const ok = this.goTo(wp.x, wp.z, 0.5);
+        this.repathT = 2.5;
+        if (!ok) o.side = (o.side || 0) + 1;
       }
       this.repathT -= dt;
       const moving = this._steer(dt);
-      if (!this.path && !moving) { this.goal = null; o.blockedT = (o.blockedT || 0) + dt; } else o.blockedT = 0;
+      if (!this.path && !moving) {
+        this.goal = null;
+        o.blockedT = (o.blockedT || 0) + dt;
+        if (o.blockedT > 2.5) { o.blockedT = 0; o.side = (o.side || 0) + 1; }
+      } else o.blockedT = 0;
+      if ((o.side || 0) > 5) {
+        // unreachable from every side: give up on this node
+        (this._skip ||= new Set()).add(t);
+        const next = this._nextWork(o);
+        this.command(next || (this.carry.amount > 0 ? { type: 'dropoff', then: null } : null));
+        return IDLE_RESULT;
+      }
       return { moving, workAnim: null };
     }
+    o.working = true;
+    o.blockedT = 0;
     this.goal = null; this.path = null;
     this.vx = this.vz = 0;
-    this.face(isTree && t.state !== 'standing' ? wp.x + Math.cos(t.fallDir) * 3 : t.x, isTree && t.state !== 'standing' ? wp.z + Math.sin(t.fallDir) * 3 : t.z);
-    // AoE: the first chop fells the tree
-    if (isTree && t.state === 'standing') g.trees.fell(t, this.x, this.z);
-    const rate = GATHER_RATE[o.kind] || 0.3;
+    this.face(wp.fx, wp.fz);
+    // standing tree: a few blows bring it down (it shivers with each one)
+    if (isTree && t.state === 'standing') {
+      t.chopT = (t.chopT || 0) + dt;
+      if (t.chopT >= FELL_TIME) g.trees.fell(t, this.x, this.z);
+      this._workTick(dt, 1.1, CHOP_IMPACTS, 'chop', t);
+      return { moving: false, workAnim: ANIM.CHOP };
+    }
+    if (kind === 'carcass') t.worked = g.time;
+    const rate = GATHER_RATE[kind] || 0.3;
     o.acc = (o.acc || 0) + rate * dt;
     if (o.acc >= 1) {
       const n = Math.floor(o.acc);
@@ -391,11 +637,14 @@ export class Unit extends Entity {
       else if (t.isBuilding) { got = Math.min(n, t.food); t.food -= got; if (t.food <= 0) g.farmDepleted(t); }
       else got = t.take(n);
       this.carry.res = res;
+      this.carry.kind = kind;
       this.carry.amount += got;
-      g.onGatherTick?.(this, o.kind);
+      g.onGatherTick?.(this, kind);
     }
-    const anim = o.kind === 'tree' ? ANIM.CHOP : (o.kind === 'gold' || o.kind === 'stone') ? ANIM.MINE : ANIM.FORAGE;
-    this._workTick(dt, anim === ANIM.FORAGE ? 1.6 : 1.1);
+    const anim = kind === 'tree' ? ANIM.CHOP : (kind === 'gold' || kind === 'stone') ? ANIM.MINE : ANIM.FORAGE;
+    const strike = kind === 'tree' ? 'chop' : kind === 'gold' ? 'gold' : kind === 'stone' ? 'stone' : kind;
+    if (anim === ANIM.FORAGE) this._workTick(dt, 1.6, FORAGE_IMPACTS, strike, t);
+    else this._workTick(dt, 1.1, CHOP_IMPACTS, strike, t);
     return { moving: false, workAnim: anim };
   }
 
@@ -416,136 +665,134 @@ export class Unit extends Entity {
       if (!this.path && !moving) { this.goal = null; if (!b.contains(this.x, this.z, this.def.radius + 2.5)) this.goTo(ep.x, ep.z, 1.5); }
       return { moving };
     }
-    g.players[this.owner].res[this.carry.res] += this.carry.amount;
-    g.players[this.owner].gathered[this.carry.res] += this.carry.amount;
-    g.onDeposit?.(this, b);
-    this.carry = { res: null, amount: 0 };
+    const { res, amount } = this.carry;
+    g.players[this.owner].res[res] += amount;
+    g.players[this.owner].gathered[res] += amount;
+    this.carry = { res: null, amount: 0, kind: null };
+    g.onDeposit?.(this, b, res, amount);
     this.command(o.then || null);
     return { moving: false };
+  }
+
+  /** Walks to a spot on the building's perimeter; true once there. */
+  _toSite(dt, b) {
+    if (b.contains(this.x, this.z, this.def.radius + 1.3)) return true;
+    if (!this.goal) {
+      const a = (this.id * 2.4) % (Math.PI * 2);
+      const half = b.size / 2 + 0.8;
+      this.goTo(b.x + Math.cos(a) * half, b.z + Math.sin(a) * half, 1.2);
+    }
+    const moving = this._steer(dt);
+    if (!this.path && !moving) this.goal = null;
+    this._siteMoving = moving;
+    return false;
   }
 
   _build(dt, o) {
     const g = this.game;
     const b = o.target;
     if (!b || !b.alive || b.built) {
-      // continue with work implied by the building
+      if (this.queue.length) { this.command(null); return IDLE_RESULT; }
+      // continue with the work implied by the building
       if (b && b.alive && b.built) {
-        if (b.kind === 'farm' && !b.farmer) { b.farmer = this; this.command({ type: 'gather', target: b, kind: 'farm' }); return { moving: false, workAnim: null }; }
+        if (b.kind === 'farm' && (!b.farmer || !b.farmer.alive || b.farmer === this)) { b.farmer = this; this.command({ type: 'gather', target: b, kind: 'farm' }); return IDLE_RESULT; }
         const auto = g.autoGatherFor(this, b);
-        if (auto) { this.command(auto); return { moving: false, workAnim: null }; }
+        if (auto) { this.command(auto); return IDLE_RESULT; }
         const other = g.findFoundation(this.owner, this.x, this.z, 20);
-        if (other) { this.command({ type: 'build', target: other }); return { moving: false, workAnim: null }; }
+        if (other) { this.command({ type: 'build', target: other }); return IDLE_RESULT; }
       }
       this.command(null);
-      return { moving: false, workAnim: null };
+      return IDLE_RESULT;
     }
     this.tools = TOOL_BIT.hammer;
-    if (!b.contains(this.x, this.z, this.def.radius + 1.3)) {
-      if (!this.goal) {
-        const a = (this.id * 2.4) % (Math.PI * 2);
-        const half = b.size / 2 + 0.8;
-        this.goTo(b.x + Math.cos(a) * half, b.z + Math.sin(a) * half, 1.2);
-      }
-      const moving = this._steer(dt);
-      if (!this.path && !moving) this.goal = null;
-      return { moving, workAnim: null };
-    }
+    if (!this._toSite(dt, b)) return { moving: this._siteMoving, workAnim: null };
     this.goal = null; this.path = null; this.vx = this.vz = 0;
     this.face(b.x, b.z);
     b.addProgress(dt, Math.max(1, b.builders));
     b._buildersNext = (b._buildersNext || 0) + 1;
-    this._workTick(dt, 0.9);
+    this._workTick(dt, 0.9, BUILD_IMPACTS, 'hammer', b);
     g.onBuildTick?.(this, b);
     return { moving: false, workAnim: ANIM.BUILD };
   }
 
-  _attack(dt, o) {
+  /** Repairs cost a share of the building's price, paid as the hit points come back. */
+  _repair(dt, o) {
     const g = this.game;
-    const t = o.target;
-    const tAlive = t && t.alive && (t.isUnit || t.isBuilding);
-    if (!tAlive) {
-      // look for another target nearby, otherwise go idle
-      const e = this.isMilitary || o.hunt ? g.findEnemy(this, this.def.los, o.hunt) : null;
-      if (e && !o.hunt) { o.target = e; this.goal = null; return { moving: false, workAnim: null }; }
-      if (o.hunt && t && !t.alive && t.carcass) {
-        this.command({ type: 'gather', target: t.carcass, kind: 'carcass' });
-        return { moving: false, workAnim: null };
-      }
+    const b = o.target;
+    if (!b || !b.alive || !b.built || b.hp >= b.maxHp) {
+      if (b && b.alive && b.hp >= b.maxHp) g.onRepaired?.(b, this);
       this.command(null);
-      return { moving: false, workAnim: null };
+      return IDLE_RESULT;
     }
-    // buildings: distance to the footprint box, units: centre distance minus radii
-    const reachR = (this.def.range > 2 ? this.def.range : 0.9 + (this.def.range || 0)) + this.def.radius;
-    let range, d;
-    if (t.isBuilding) {
-      const h = t.size / 2;
-      d = Math.hypot(Math.max(0, Math.abs(t.x - this.x) - h), Math.max(0, Math.abs(t.z - this.z) - h));
-      range = reachR + 0.3;
-    } else {
-      d = this.dist(t);
-      range = reachR + t.def.radius;
-    }
-    // leash auto-acquired chases
-    if (o.auto && o.home && Math.hypot(this.x - o.home.x, this.z - o.home.z) > this.def.los * 1.6) { this.command({ type: 'move', x: o.home.x, z: o.home.z }); return { moving: false, workAnim: null }; }
-    if (d > range) {
-      this.repathT -= dt;
-      if (!this.goal || this.repathT <= 0) {
-        this.repathT = 0.8;
-        const p = t.isBuilding ? t.edgePoint(this) : t;
-        this.goTo(p.x, p.z, Math.max(0.5, range * 0.8));
-      }
-      const moving = this._steer(dt);
-      if (!this.path && !moving) this.goal = null;
-      return { moving, workAnim: null };
-    }
+    this.tools = TOOL_BIT.hammer;
+    if (!this._toSite(dt, b)) return { moving: this._siteMoving, workAnim: null };
     this.goal = null; this.path = null; this.vx = this.vz = 0;
-    this.face(t.x, t.z);
-    const ranged = this.def.range > 2;
-    if (this.cooldown <= 0) {
-      this.cooldown = 1 / (this.def.rate || 0.5);
-      this.attackStart = g.time;
-      if (ranged) g.fireProjectile(this, t, { x: this.x, y: this.y + 1.5, z: this.z });
-      else {
-        const dmg = this.isVillager && t.isAnimal ? 3 : damage(this, t);
-        if (t.isUnit) t.takeDamage(dmg, this); else g.damageBuilding(t, dmg * (this.isVillager ? 1 : 0.8), this);
-        g.onMeleeHit?.(this, t);
-      }
+    this.face(b.x, b.z);
+    b._buildersNext = (b._buildersNext || 0) + 1;
+    const n = Math.max(1, b.builders);
+    const share = n <= 1 ? 1 : 3 / (n + 2);
+    const hp = Math.min(b.maxHp - b.hp, (dt * REPAIR.speed * share * b.maxHp) / b.def.time);
+    const p = g.players[this.owner];
+    const debt = (o.debt ||= {});
+    for (const [k, v] of Object.entries(b.def.cost || {})) {
+      debt[k] = (debt[k] || 0) + (v * REPAIR.cost * hp) / b.maxHp;
+      const whole = Math.floor(debt[k]);
+      if (whole <= 0) continue;
+      if (p.res[k] < whole) { g.onRepairStalled?.(this, b, k); this.command(null); return IDLE_RESULT; }
+      p.res[k] -= whole;
+      debt[k] -= whole;
     }
-    const k = Math.min(1, (g.time - (this.attackStart || 0)) * (this.def.rate || 0.5));
-    this.phase = k;
-    return { moving: false, workAnim: ranged ? ANIM.SHOOT : (this.kind === 'spearman' ? ANIM.THRUST : ANIM.ATTACK) };
+    b.hp += hp;
+    this._workTick(dt, 0.9, BUILD_IMPACTS, 'hammer', b);
+    return { moving: false, workAnim: ANIM.BUILD };
   }
 
   _animal(dt) {
     const g = this.game;
-    // flee when hit (deer) or wander slowly
-    if (this.lastHitBy && this.kind === 'deer' && this.lastHitBy.alive) {
+    if (this.def.herdable) {
+      this.herdT -= dt;
+      if (this.herdT <= 0) { this.herdT = 0.5; g.herdCheck(this); }
+    }
+    // a hit deer bolts a good distance away, then calms down and grazes again
+    if (this.fleeFrom) {
       this.state = 'flee';
-      if (!this.goal || this.arrived()) {
-        const a = Math.atan2(this.z - this.lastHitBy.z, this.x - this.lastHitBy.x) + (Math.random() - 0.5);
-        this.goTo(this.x + Math.cos(a) * 12, this.z + Math.sin(a) * 12, 1);
+      if (!this.fleeGoal) {
+        const a = Math.atan2(this.z - this.fleeFrom.z, this.x - this.fleeFrom.x) + (Math.random() - 0.5) * 0.9;
+        const r = 10 + Math.random() * 5;
+        this.fleeGoal = {
+          x: Math.max(4, Math.min(MAP_SIZE - 4, this.x + Math.cos(a) * r)),
+          z: Math.max(4, Math.min(MAP_SIZE - 4, this.z + Math.sin(a) * r)),
+        };
+        this.goal = null;
+        this.goTo(this.fleeGoal.x, this.fleeGoal.z, 1.2);
       }
       const moving = this._steer(dt);
-      if (Math.random() < dt * 0.3) this.lastHitBy = null;
+      if (!this.path) {
+        this.fleeFrom = null; this.fleeGoal = null;
+        this.home = { x: this.x, z: this.z };
+        this.thinkT = 3 + Math.random() * 3;
+      }
       return moving;
     }
     this.state = 'wander';
     if (this.thinkT <= 0) {
       this.thinkT = 4 + Math.random() * 8;
       if (Math.random() < 0.4) {
-        const a = Math.random() * Math.PI * 2, r = 2 + Math.random() * 5;
+        // owned sheep stay where they were left
+        const roam = this.owner >= 0 ? 1.2 : 5;
+        const a = Math.random() * Math.PI * 2, r = 1 + Math.random() * roam;
         const home = this.home || (this.home = { x: this.x, z: this.z });
         this.goTo(home.x + Math.cos(a) * r, home.z + Math.sin(a) * r, 0.6);
       }
     }
-    const moving = this.path ? this._steer(dt * 0.6) : false;
-    return moving;
+    return this.path ? this._steer(dt * 0.6) : false;
   }
 }
 
 // ---------------------------------------------------------------------------
 export class Projectile {
-  constructor(game, from, target, origin) {
+  constructor(game, from, target, origin, opts = {}) {
+    this.kind = opts.kind || 'arrow';
     this.game = game;
     this.from = from;
     this.target = target;
@@ -553,17 +800,18 @@ export class Projectile {
     const tx = target.x, tz = target.z;
     const ty = (target.y ?? game.world.heightAt(tx, tz)) + (target.isBuilding ? 2.5 : 1.1);
     const d = Math.hypot(tx - this.x, tz - this.z);
-    this.flight = Math.max(0.35, d / 32);
+    const spear = this.kind === 'spear';
+    this.flight = Math.max(spear ? 0.22 : 0.35, d / (spear ? 15 : 32));
     this.t = 0;
     this.sx = this.x; this.sy = this.y; this.sz = this.z;
     // lead moving targets a little
     this.ex = tx + (target.vx || 0) * this.flight * 0.8;
     this.ez = tz + (target.vz || 0) * this.flight * 0.8;
     this.ey = ty;
-    this.arc = d * 0.18;
+    this.arc = d * (spear ? 0.1 : 0.18);
     this.alive = true;
     this.owner = from.owner;
-    this.dmg = from.isUnit ? damage(from, target) : Math.max(1, from.def.attack - (target.def?.pierceArmor || 0));
+    this.dmg = opts.dmg ?? (from.isUnit ? damage(from, target) : Math.max(1, from.def.attack - (target.def?.pierceArmor || 0)));
   }
   update(dt) {
     this.t += dt;
@@ -578,8 +826,9 @@ export class Projectile {
       const t = this.target;
       if (t && t.alive && Math.hypot(t.x - this.x, t.z - this.z) < (t.isBuilding ? t.size / 2 + 0.5 : 1.3)) {
         if (t.isUnit) t.takeDamage(this.dmg, this.from); else this.game.damageBuilding(t, this.dmg * 0.5, this.from);
+        this.game.onProjectileHit?.(this, t);
       } else {
-        this.game.stuckArrow?.(this.x, this.game.world.heightAt(this.x, this.z), this.z, this.dx, this.dz);
+        this.game.stuckArrow?.(this.x, this.game.world.heightAt(this.x, this.z), this.z, this.dx, this.dz, this.kind);
       }
     }
   }
